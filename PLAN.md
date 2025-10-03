@@ -318,6 +318,13 @@ Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days defa
    - Handles slug collisions: static wins, then earlier registry wins
    - Logs collisions and keeps first occurrence
    - No server cache persistence (re-fetch on restart)
+4a. Create command-line test utility (`src/scripts/testRegistryManager.ts`)
+   - Loads static `libraries` and `registries` from config file
+   - Instantiates server-side library registry manager
+   - Emits errors/warnings to stderr
+   - Emits merged library list as JSON to stdout
+   - Usage: `npm run test:registry` or `ts-node src/scripts/testRegistryManager.ts`
+   - Helps validate registry manager logic in development
 5. Update `LibraryData` interface to include `id` field and `source` tracking
 6. Create client-side hook `useLibraries` to fetch from `/api/libraries`
 7. Create `LibraryAffiliationsContext` for affiliation management (client-side)
@@ -336,6 +343,7 @@ Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days defa
 - `src/constants/registry.ts` (new) - Constants for intervals, expiration, limits
 - `src/pages/api/libraries.ts` (new) - API route for library queries
 - `src/server/libraryRegistry.ts` (new) - Server-side registry manager with caching
+- `src/scripts/testRegistryManager.ts` (new) - CLI test utility for registry manager
 - `src/utils/librarySlug.ts` (new) - Server-side slug generation hook from catalog entries
 - `src/hooks/useLibraries.ts` (new) - Client hook to fetch from API route
 - `src/interfaces.ts` (modify) - Add `id` and `source` fields to `LibraryData`
@@ -345,6 +353,7 @@ Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days defa
 - `src/components/PublicComputerWarning.tsx` (new)
 - `src/components/SlugChangeNotification.tsx` (new) - Banner for slug changes
 - `src/dataflow/getLibraryData.ts` (modify) - Include ID in `buildLibraryData`
+- `package.json` (modify) - Add `test:registry` script
 
 ---
 
@@ -652,6 +661,90 @@ registries:
   # - url: https://regional-registry.example.com/libraries
   #   refresh_min_interval: 120
   #   refresh_max_interval: 600
+```
+
+---
+
+## Development Tools
+
+### Registry Manager Test Utility
+
+A command-line tool for testing and validating the server-side library registry manager in development environments.
+
+**Location:** `src/scripts/testRegistryManager.ts`
+
+**Purpose:**
+- Validate registry manager logic without running full Next.js server
+- Test configuration changes quickly
+- Debug registry fetching and merging logic
+- Verify slug generation and collision handling
+
+**Functionality:**
+1. Load configuration from `CONFIG_FILE` environment variable (same as production)
+2. Parse static `libraries` and `registries` from YAML config
+3. Instantiate the server-side library registry manager
+4. Fetch from all configured registries
+5. Apply merge logic (static > registry[0] > registry[1] > ...)
+6. Generate slugs for all libraries
+7. Detect and log any collisions
+8. Output results
+
+**Output Specification:**
+- **stdout**: JSON array of merged libraries with all fields
+  ```json
+  [
+    {
+      "id": "nypl",
+      "slug": "nypl",
+      "title": "New York Public Library",
+      "authDocUrl": "https://...",
+      "logoUrl": "https://...",
+      "source": "static"
+    },
+    {
+      "id": "queens-library",
+      "slug": "queens-library",
+      "title": "Queens Library",
+      "authDocUrl": "https://...",
+      "logoUrl": "https://...",
+      "source": "https://registry.thepalaceproject.org/libraries"
+    }
+  ]
+  ```
+- **stderr**: Error and warning messages
+  - Registry fetch errors
+  - Slug collisions (with library name and identifier)
+  - Configuration errors
+  - Precedence warnings (when registry library overridden by static)
+
+**Usage:**
+```bash
+# Via npm script
+CONFIG_FILE=community-config.yml npm run test:registry
+
+# Direct with ts-node
+CONFIG_FILE=community-config.yml ts-node src/scripts/testRegistryManager.ts
+
+# Pipe output for analysis
+CONFIG_FILE=config.yml npm run test:registry | jq '.[] | select(.source != "static")'
+```
+
+**Implementation Notes:**
+- Should use same code paths as production API route
+- No caching (always fresh fetch for testing)
+- Exit codes:
+  - 0: Success (even if warnings)
+  - 1: Configuration error
+  - 2: Registry fetch failure (all registries failed)
+- Can be used in CI for config validation
+
+**package.json addition:**
+```json
+{
+  "scripts": {
+    "test:registry": "ts-node src/scripts/testRegistryManager.ts"
+  }
+}
 ```
 
 ---
