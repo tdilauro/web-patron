@@ -116,12 +116,21 @@ libraries:
 # Registry configurations (list of registries to fetch from at runtime)
 registries:
   - url: https://registry.thepalaceproject.org/libraries
-    refresh_min_interval: 60   # seconds, default 1 min (rate limit)
-    refresh_max_interval: 300   # seconds, default 5 min (auto-refresh)
+    refresh_min_interval: 60   # seconds (default: use constant)
+    refresh_max_interval: 300   # seconds (default: use constant)
   # Future: support for multiple registries
   # - url: https://another-registry.example.com/libraries
   #   refresh_min_interval: 120
   #   refresh_max_interval: 600
+```
+
+**Constants:**
+```typescript
+// src/constants/registry.ts
+export const REGISTRY_REFRESH_MIN_INTERVAL = 60;    // seconds
+export const REGISTRY_REFRESH_MAX_INTERVAL = 300;   // seconds
+export const CREDENTIAL_EXPIRATION_DAYS = 30;
+export const HISTORICAL_SLUG_LIMIT = 5;             // max previous slugs to track
 ```
 
 ---
@@ -134,9 +143,10 @@ registries:
 - Location: `src/components/LibrarySearch.tsx`
 - Features:
   - Fuzzy search using `fuse.js` (already in dependencies)
-  - Search by library name, ID, location metadata
-  - Display search results with library logos and descriptions
+  - Initial focus: Search by `catalogEntry.metadata.title` only
+  - Display search results with library logos and titles
   - "Add Library" button for each result
+  - Future: Expand to include location and description metadata
 
 **b) Library Affiliation Manager**
 - Location: `src/components/LibraryAffiliations.tsx`
@@ -179,13 +189,19 @@ User searches for library
 ```typescript
 // New file: src/utils/librarySlug.ts
 function computeSlug(catalogEntry: RegistryCatalogEntry): string {
-  // Compute URL-friendly slug from individual catalog entry data
+  // Hook function for slug computation - implementation can change as needs evolve
   // catalogEntry is at registryFeed.catalogs[n] level (individual library)
   // NOT catalog-level metadata
-  // Examples: catalogEntry.metadata.title → "queens-library"
+
+  // Initial implementation (for backward compatibility):
+  // Use catalogEntry.metadata.id directly
+  return catalogEntry.metadata.id;
+
+  // Future: Can update to slugify title, combine fields, etc.
   // This gives flexibility to adjust base URLs per library as needs change
-  // Must be deterministic but can change if library metadata changes
 }
+
+// For static libraries: slug is the config key (dictionary key)
 ```
 
 **Storage Architecture:**
@@ -198,12 +214,16 @@ interface LibraryAffiliation {
   slug: string;         // URL-friendly (computed, can change)
   title: string;
   authDocUrl: string;
+  logoUrl?: string;     // Cached for offline display
   addedAt: number;      // timestamp
   persist: boolean;     // user's choice to remember
-  registrySource?: string; // If from registry, store registry URL
+  source: 'static' | string; // 'static' or registry URL for tracking
 }
 
 type Affiliations = LibraryAffiliation[];
+
+// Note: No limit on number of affiliations (browser-side storage only)
+// Logo images cached by browser for affiliated libraries
 ```
 
 **b) Credentials** (enhanced)
@@ -250,11 +270,13 @@ interface AuthCredentials {
 
 **Cookie Configuration:**
 ```typescript
+import { CREDENTIAL_EXPIRATION_DAYS } from 'constants/registry';
+
 // Session (current behavior)
 Cookie.set(key, value); // No expires
 
 // Persistent (new)
-Cookie.set(key, value, { expires: 30 }); // 30 days
+Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days default
 ```
 
 **Login Form Updates:**
@@ -269,45 +291,59 @@ Cookie.set(key, value, { expires: 30 }); // 30 days
 
 ### Phase 1: Foundation (No UI changes)
 
-1. Create server-side slug generation utility (`src/utils/librarySlug.ts`)
+1. Create constants file (`src/constants/registry.ts`)
+   - Define refresh intervals, expiration days, historical slug limit
+   - Ensures easy updates and reuse in tests
+2. Create server-side slug generation utility (`src/utils/librarySlug.ts`)
    - Takes individual catalog entry (registryFeed.catalogs[n]) as input
-   - Generates slug from library-specific metadata (not catalog-level metadata)
-   - Provides hook to adjust base URLs for libraries as needs change
-2. Create Next.js API route `/api/libraries` with:
+   - Hook function that can evolve: initially uses `catalogEntry.metadata.id`
+   - For static libraries: slug is the config key
+   - Handles collisions: log error and keep first occurrence
+3. Create Next.js API route `/api/libraries` with:
    - Server-side registry fetch logic for multiple registries
    - Min/max interval refresh logic per registry
    - In-memory server cache per registry (Map of registryUrl -> state)
    - Merge strategy: static > registry[0] > registry[1] (earlier wins on slug conflicts)
    - Static libraries cannot be overridden by registry libraries
+   - Log collisions with library name and identifier
+   - Track source (static or registry URL) for each library
    - Fallback to last successful state per registry (not build-time)
    - Returns only client-safe library properties
-3. Create server-side library registry manager (`src/server/libraryRegistry.ts`)
+4. Create server-side library registry manager (`src/server/libraryRegistry.ts`)
    - Maintains server-side cache per registry
    - Handles fetching from multiple registries
    - Implements min/max interval logic per registry
    - Merges libraries with precedence: static > registry[0] > registry[1] > ...
    - Computes slugs server-side from individual catalog entries
    - Handles slug collisions: static wins, then earlier registry wins
-4. Update `LibraryData` interface to include `id` field
-5. Create client-side hook `useLibraries` to fetch from `/api/libraries`
-6. Create `LibraryAffiliationsContext` for affiliation management (client-side)
-7. Add localStorage utilities for affiliations (client-side only)
-8. Update `useCredentials` hook to support persistence option and use library ID
-9. Add public computer warning modal component
-10. Create slug ↔ id mapping utilities (server-side primary, client receives computed values)
+   - Logs collisions and keeps first occurrence
+   - No server cache persistence (re-fetch on restart)
+5. Update `LibraryData` interface to include `id` field and `source` tracking
+6. Create client-side hook `useLibraries` to fetch from `/api/libraries`
+7. Create `LibraryAffiliationsContext` for affiliation management (client-side)
+   - No limit on number of affiliations
+   - Tracks source for each library
+8. Add localStorage utilities for affiliations (client-side only)
+9. Update `useCredentials` hook to support persistence option and use library ID
+   - Clean break for cookie migration (no automatic migration)
+10. Add public computer warning modal component
+11. Create slug ↔ id mapping utilities (server-side primary, client receives computed values)
+12. Implement slug redirect with user notification banner
 
 **Estimated Complexity:** High (server-side architecture shift)
 
 **Key Files:**
+- `src/constants/registry.ts` (new) - Constants for intervals, expiration, limits
 - `src/pages/api/libraries.ts` (new) - API route for library queries
 - `src/server/libraryRegistry.ts` (new) - Server-side registry manager with caching
-- `src/utils/librarySlug.ts` (new) - Server-side slug generation from catalog metadata
+- `src/utils/librarySlug.ts` (new) - Server-side slug generation hook from catalog entries
 - `src/hooks/useLibraries.ts` (new) - Client hook to fetch from API route
-- `src/interfaces.ts` (modify) - Add `id` field to `LibraryData`, create client-safe types
+- `src/interfaces.ts` (modify) - Add `id` and `source` fields to `LibraryData`
 - `src/context/LibraryAffiliationsContext.tsx` (new) - Client-side affiliation management
 - `src/utils/libraryAffiliations.ts` (new) - Client-side affiliation storage
 - `src/auth/useCredentials.ts` (modify) - Use library ID instead of slug
 - `src/components/PublicComputerWarning.tsx` (new)
+- `src/components/SlugChangeNotification.tsx` (new) - Banner for slug changes
 - `src/dataflow/getLibraryData.ts` (modify) - Include ID in `buildLibraryData`
 
 ---
@@ -315,9 +351,12 @@ Cookie.set(key, value, { expires: 30 }); // 30 days
 ### Phase 2: Library Search & Discovery
 
 1. Create `LibrarySearch` component with fuzzy search
+   - Initial search by `metadata.title` only
+   - Support for deep linking with query parameter (`/add-library?q=queens`)
 2. Create `LibraryAffiliations` management component
 3. Update home page (`src/pages/index.tsx`) to show affiliations
 4. Add "Find a Library" flow
+5. Implement logo caching for affiliated libraries (browser cache)
 
 **Estimated Complexity:** Medium-High
 
@@ -425,18 +464,19 @@ export interface ClientLibraryInfo {
 // Server-side full library data (includes registry metadata)
 export interface ServerLibraryData extends ClientLibraryInfo {
   registryMetadata?: Record<string, any>; // Full registry catalog data
-  source: 'build-time' | 'registry';
+  source: 'static' | string; // 'static' or registry URL
 }
 
-// Client-side affiliation (localStorage)
+// Client-side affiliation (localStorage) - matches updated interface from earlier
 export interface LibraryAffiliation {
   id: string;           // Stable identifier
   slug: string;         // URL-friendly (computed server-side)
   title: string;
   authDocUrl: string;
+  logoUrl?: string;     // Cached for offline display
   addedAt: number;
   persist: boolean;
-  registrySource?: string;
+  source: 'static' | string; // 'static' or registry URL for tracking
 }
 
 // Existing LibraryData with ID added
@@ -449,18 +489,16 @@ export interface LibraryData {
   // ... other existing fields
 }
 
-// Server-side registry state
+// Server-side registry state (per registry URL)
 export interface ServerRegistryState {
   libraries: Record<string, ServerLibraryData>; // id -> library data
   lastSuccessfulFetch: number | null;
   lastAttemptedFetch: number | null;
-  source: 'build-time' | 'registry';
 }
 
 // API response type
 export interface LibrariesApiResponse {
   libraries: ClientLibraryInfo[];
-  source: 'build-time' | 'registry';
   lastUpdated: number | null;
 }
 
@@ -499,19 +537,22 @@ When a library's metadata changes in the registry, the computed slug may change:
 **Implementation:**
 ```typescript
 // src/server/libraryRegistry.ts (server-side)
+import { HISTORICAL_SLUG_LIMIT } from 'constants/registry';
+
 interface LibraryMapping {
   id: string;
   currentSlug: string;
-  previousSlugs?: string[]; // Historical slugs for redirect
+  previousSlugs?: string[]; // Historical slugs for redirect (max 5)
 }
 
 // When server-side registry refreshes:
 // 1. Compute new slug from fresh metadata (server-side)
 // 2. If slug changed, add old slug to previousSlugs[] in server cache
-// 3. API returns updated slug to client
-// 4. Client updates affiliations with new slug
-// 5. Keep previousSlugs[] on server for backwards compat (max 5?)
+// 3. Limit previousSlugs to HISTORICAL_SLUG_LIMIT (5)
+// 4. API returns updated slug to client
+// 5. Client updates affiliations with new slug
 // 6. When client requests /[library]/, server checks both current and previous slugs
+// 7. If old slug accessed: show notification banner, then redirect to new slug
 ```
 
 ### Backward Compatibility
@@ -519,7 +560,8 @@ interface LibraryMapping {
 - Registry URL in config is optional
 - Credential cookies keyed by ID remain compatible across slug changes
 - Affiliations stored by ID remain compatible across slug changes
-- Historical slugs provide backwards compatibility for bookmarks
+- Historical slugs (up to 5) provide backwards compatibility for bookmarks
+- Cookie migration: Clean break (users must re-login, no automatic migration)
 - No breaking changes to existing API
 
 ---
@@ -653,10 +695,10 @@ registries:
 - Same library slug in multiple registries (earlier registry wins)
 - Slug collision across static and registry libraries (server-side resolution)
 - Slug changes while user is browsing (next page load gets new slug from API)
-- Cookie migration from slug-based to ID-based keys (one-time migration on server)
+- Cookie migration from slug-based to ID-based keys (clean break, no migration)
 - First-time user with no server cache (uses static libraries until registries fetch)
 - Registry fetch times out (server respects min interval for retry on that registry)
-- Multiple Next.js server instances (each has own cache - consider Redis for shared state)
+- Multiple Next.js server instances (each has own cache, eventual consistency acceptable)
 - Client requests library by old slug (server resolves via previousSlugs[])
 - One registry succeeds, another fails (use successful registry data + last good state from failed)
 - Different refresh intervals per registry (each tracks its own timing)
@@ -666,85 +708,65 @@ registries:
 ## Migration Path
 
 ### For Existing Users
-- No action required
-- Existing cookies continue to work
-- Can opt into persistence on next login
-- No data loss
+- Cookie migration: Clean break (users must re-login with new ID-based cookies)
+- Can opt into credential persistence on login
+- Affiliation data is new (users start fresh)
 
 ### For Existing Deployments
-- Config file remains compatible
-- Can add registry URL without breaking changes
-- Gradual rollout possible (feature flag)
+- Config file remains compatible (existing `libraries` dictionary works)
+- Can add `registries` list without breaking changes
+- Static libraries continue to work as-is
+- Gradual rollout possible (feature flag for registry support)
 
 ---
 
-## Open Questions for Discussion
+## Implementation Decisions
 
-1. **Registry Refresh Intervals:** What are the ideal defaults?
-   - `refresh_min_interval`: 60 seconds (1 min) - prevents excessive requests
-   - `refresh_max_interval`: 300 seconds (5 min) - auto-refresh interval
-   - These are now configurable per registry in the `registries` list
+The following decisions have been made based on requirements and discussions:
 
-2. **Multi-Registry Precedence:** When multiple sources provide a library with the same slug:
-   - **Implemented strategy**: Static > Registry[0] > Registry[1] > ...
-   - Static libraries always win over registry libraries
-   - Earlier registry wins over later registry
-   - Should we warn/log when conflicts occur (slug collision)?
-   - Should we track which source a library came from in metadata?
+### Decided:
+1. **Registry Refresh Intervals**:
+   - Min: 60 seconds, Max: 300 seconds (defined in constants)
+   - Configurable per registry in config file
 
-3. **Affiliation Limit:** Should there be a max number of affiliated libraries per user?
+2. **Multi-Registry Precedence**:
+   - Static > Registry[0] > Registry[1] > ... (earlier wins)
+   - Log collisions with library name and identifier
+   - Track source (static or registry URL) for each library
 
-4. **Credential Expiration:** Should persistent credentials have a shorter expiration than 30 days?
+3. **Affiliation Limit**: No limit (browser-side storage only)
 
-5. **Search Metadata:** Does the registry feed include enough metadata for good search (location, description)?
+4. **Credential Expiration**: 30 days (defined in constant)
 
-6. **Offline Support:** Should we implement offline caching of library registry?
+5. **Search Metadata**: Initial focus on `metadata.title` only
 
-7. **Analytics:** Should we track library search queries and affiliation additions?
+6. **Offline Support**: No registry caching, but cache library logos for affiliations
 
-8. **URL Routing:** Should we support direct links like `/add-library?q=queens` for deep linking?
+7. **Analytics**: Not tracking at this time
 
-9. **Slug Algorithm:** What metadata should be used for slug generation from catalog entry?
-   - Note: Slug is computed from individual catalog entry (registryFeed.catalogs[n]), not catalog-level metadata
-   - Option A: Use `catalogEntry.metadata.id` directly as slug (simplest, but less human-readable)
-   - Option B: Slugify `catalogEntry.metadata.title` (human-readable, but more collision risk)
-   - Option C: Hybrid (slugify title, append ID fragment if collision)
-   - Benefit: Provides flexibility to adjust library base URLs as needs change
+8. **URL Routing**: Yes, support deep linking with query parameter
 
-10. **Slug Collision Resolution:** How to handle when two libraries compute to the same slug?
-    - Note: Precedence prevents some collisions (static > earlier registry)
-    - For remaining collisions within same source:
-      - Append numeric suffix? (`queens-library-2`)
-      - Append ID fragment? (`queens-library-abc123`)
-      - Fail and use ID as fallback?
-    - Must handle collisions across static libraries AND all registries
-    - Collision detection happens during merge phase on server
+9. **Slug Algorithm**: Initially use `catalogEntry.metadata.id` (via hook for future flexibility)
 
-11. **Cookie Migration:** How to handle existing cookies with slug-based keys?
-    - Server-side automatic detection and migration on first API request?
-    - Run both old and new keys in parallel temporarily?
-    - Clean break (users re-login)?
+10. **Slug Collision Resolution**:
+    - Cannot happen in static libraries (dictionary keys)
+    - For registries: Log error and keep first occurrence
 
-12. **Historical Slug Limit:** How many previous slugs to maintain per library on server? (Suggested: 5)
+11. **Cookie Migration**: Clean break (no automatic migration)
 
-13. **Slug Redirect Behavior:** When old slug accessed, should server:
-    - Silently resolve to correct library (no redirect)
-    - 301 redirect to new slug URL
-    - Show user notification banner?
+12. **Historical Slug Limit**: 5 (defined in constant)
 
-14. **Multi-Instance Deployment:** For scaled deployments with multiple Next.js instances:
-    - Keep separate in-memory caches (simpler, eventual consistency)?
-    - Use shared cache (Redis/Memcached) for consistency?
-    - What are the performance/complexity tradeoffs?
+13. **Slug Redirect Behavior**: Show notification banner, then redirect
 
-15. **Server Cache Persistence:** Should server cache survive restarts?
-    - Persist to disk/database between restarts?
-    - Or acceptable to re-fetch from registries after restart?
+14. **Multi-Instance Deployment**: Keep separate in-memory caches
 
-16. **Client-Safe Properties:** What minimal library properties should be exposed to client?
-    - Current: id, slug, title, authDocUrl, logoUrl
-    - Should we include: description, location, colors, etc.?
-    - Balance between client needs and server-side filtering
+15. **Server Cache Persistence**: No persistence, re-fetch on restart
+
+16. **Client-Safe Properties**: id, slug, title, authDocUrl, logoUrl
+
+## Remaining Open Questions
+
+None at this time. All major architectural decisions have been made.
 
 ---
 
