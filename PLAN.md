@@ -127,8 +127,8 @@ registries:
 **Constants:**
 ```typescript
 // src/constants/registry.ts
-export const REGISTRY_REFRESH_MIN_INTERVAL = 60;    // seconds
-export const REGISTRY_REFRESH_MAX_INTERVAL = 300;   // seconds
+export const DEFAULT_REGISTRY_REFRESH_MIN_INTERVAL = 60;    // seconds
+export const DEFAULT_REGISTRY_REFRESH_MAX_INTERVAL = 300;   // seconds
 export const CREDENTIAL_EXPIRATION_DAYS = 30;
 export const HISTORICAL_SLUG_LIMIT = 5;             // max previous slugs to track
 ```
@@ -327,9 +327,382 @@ Cookie.remove(key); // Regardless of persistence type
 
 ---
 
-## Implementation Phases
+## Deployment Strategy
 
-### Phase 1: Foundation (No UI changes)
+This implementation will be delivered incrementally across multiple releases. Each release should be independently testable and deployable, providing value while minimizing risk.
+
+### Migration Strategy Summary
+
+**Key Insight:** Add **Release 0** to enable config migration independently from runtime fetching:
+
+1. **Release 0** - Update config parser to support `registries` array (alongside existing formats)
+2. **Between releases** - Update production config files from string to array format, rebuild
+3. **Release 1** - Enable runtime registry fetching (uses new config format)
+
+This approach allows:
+- ✅ **Zero-risk Release 0** - Config parser changes only, no behavior changes
+- ✅ **Gradual migration** - Update configs at your own pace between releases
+- ✅ **Full compatibility** - Old configs keep working throughout
+- ✅ **Clean separation** - Config structure changes separate from runtime logic changes
+- ✅ **Easy rollback** - Each release can be independently rolled back
+
+### Release Sequencing Principles
+
+1. **Backend before Frontend** - Deploy server-side capabilities before UI that depends on them
+2. **Feature Flags** - Use configuration or environment variables to enable features gradually
+3. **Backward Compatibility** - Each release must work with existing deployments
+4. **Data Migration** - Handle storage format changes gracefully
+5. **Independent Testing** - Each release should be fully testable in isolation
+6. **Config First** - Allow config format changes before the code that uses them (Release 0)
+
+### Current Production State
+
+**Important:** Production deployments currently use `libraries` in the config as:
+- **Dictionary** (static): `libraries: { nypl: "https://...", queens: "https://..." }`
+- **String** (registry): `libraries: "https://registry.example.com/libraries"`
+
+The registry string format fetches at **build time** (see `src/config/fetch-config.js:112-114`).
+
+The new architecture needs to:
+1. Support both existing formats during migration
+2. Introduce `registries` list without breaking current deployments
+3. Gradually migrate registry-based deployments from build-time to runtime fetching
+
+### Proposed Release Sequence
+
+#### Release 0: Config Migration Support (Zero UI Impact)
+**Goal:** Update config parsing to support new `registries` list while maintaining backward compatibility
+
+**Scope:**
+- Update `src/config/fetch-config.js` to support new config format:
+  - `libraries` (object): Static libraries (existing)
+  - `libraries` (string): Registry URL - still build-time (existing, deprecated path)
+  - `registries` (array): Registry configs for runtime fetching (new)
+- Add deprecation warning when `libraries` is a string
+- Document migration path in config file
+
+**Config Format Evolution:**
+```javascript
+// Current production (still supported):
+libraries: "https://registry.example.com/libraries"  // Build-time fetch
+
+// New format (backward compatible):
+libraries:
+  featured-lib: https://...  // Static (optional)
+registries:
+  - url: "https://registry.example.com/libraries"  // Runtime fetch
+    refresh_min_interval: 60
+    refresh_max_interval: 300
+```
+
+**Testing:**
+- Test all three config formats work correctly
+- Verify deprecation warning appears for string format
+- Validate no behavior change in any deployment
+
+**Deployment Notes:**
+- **Zero functional changes** - just enables future config migration
+- String `libraries` continues to work (build-time fetch as before)
+- New `registries` array has no effect yet (will be used in Release 1)
+- Can update production config files to new format at any time
+
+**Migration Path for Deployments:**
+1. Deploy Release 0 (supports both old and new config formats)
+2. Update config files: convert string `libraries` to `registries` array
+3. Rebuild (still build-time fetch, but using new config structure)
+4. After Release 1 deployed: runtime fetching automatically enabled
+
+**Feature Flag:** None needed (pure config parsing change)
+
+---
+
+#### Release 1: Server-Side Registry Foundation
+**Goal:** Enable runtime library fetching without any UI changes
+
+**Scope:**
+- Constants file (`src/constants/registry.ts`)
+- Server-side registry manager (`src/server/libraryRegistry.ts`)
+- API route `/api/libraries`
+- Server-side slug generation utilities
+- Use `registries` array from config for runtime fetching
+- CLI test utility (`npm run test:registry`)
+
+**Testing:**
+- Unit tests for registry manager and API route
+- CLI utility validation with real registry endpoints
+- Verify static libraries still work unchanged
+- Verify build-time registry fetch still works (deprecated path)
+
+**Deployment Notes:**
+- Configs with `registries` array now fetch at **runtime** (not build time)
+- Configs with string `libraries` still fetch at **build time** (deprecated)
+- Configs with object `libraries` (static) unchanged
+- No client-side changes means no user impact
+- Deployments can migrate configs from string to array format
+
+**Feature Flag:** `ENABLE_RUNTIME_REGISTRY` (default: false, enable when registry array present)
+
+**Migration Checkpoint:**
+- Deployments using string `libraries`: Update config to `registries` array, then redeploy
+- This shifts from build-time to runtime fetching (after Release 1 deployed)
+
+---
+
+#### Release 2: Library ID Infrastructure
+**Goal:** Support stable library IDs alongside slugs
+
+**Scope:**
+- Add `id` and `source` fields to `LibraryData` interface
+- Update `buildLibraryData` to include ID
+- Update `useCredentials` to support both slug and ID (dual-mode)
+- Add slug ↔ ID mapping utilities
+- Update all storage operations to check for both formats
+
+**Testing:**
+- Verify existing slug-based cookies still work
+- Verify ID-based cookies work for new libraries
+- Test slug changes don't break credentials
+
+**Deployment Notes:**
+- Fully backward compatible with existing cookies
+- Both slug-based and ID-based cookies work
+- No user action required
+- Can gradually migrate to ID-only in future release
+
+**Data Migration:** None (dual-mode support during transition)
+
+---
+
+#### Release 3: Pinned Libraries Storage (No UI)
+**Goal:** Enable pinned library persistence without UI
+
+**Scope:**
+- `PinnedLibrariesContext` implementation
+- localStorage utilities for pinned libraries
+- Hook to sync pinned libraries with available libraries
+- Public computer warning modal component (not yet shown)
+- Unpin confirmation dialog component (not yet shown)
+
+**Testing:**
+- Unit tests for localStorage operations
+- Test localStorage QuotaExceeded handling
+- Verify context provides correct data
+
+**Deployment Notes:**
+- Components exist but aren't rendered yet
+- No UI changes visible to users
+- Enables next release to show pinned libraries
+
+**Feature Flag:** None needed (no visible changes)
+
+---
+
+#### Release 4: Enhanced Home Page
+**Goal:** Show pinned libraries and search UI
+
+**Scope:**
+- `LibrarySearch` component with fuzzy search
+- `PinnedLibraries` management component
+- Update home page to show "My Libraries" section
+- "Find a Library" button and modal
+- Deep linking support (`/add-library?q=queens`)
+- Public computer warning (shown on first pin)
+
+**Testing:**
+- Integration tests for search flow
+- Test pinning/unpinning libraries
+- Test public computer warning behavior
+- Test deep linking to search
+
+**Deployment Notes:**
+- Users see new search and pinning UI
+- Existing users see "Find Your Library" (no pinned libraries yet)
+- Users can start building their library list
+- All libraries still accessible (backward compatible)
+
+**Feature Flag:** `ENABLE_LIBRARY_PINNING` (default: true after Release 3)
+
+---
+
+#### Release 5: Credential Persistence Enhancement
+**Goal:** Add "Remember me" and pin integration to login forms
+
+**Scope:**
+- Update all auth handlers (Basic, Token, SAML, Clever)
+- Add two checkboxes to login forms
+- Implement persistent vs session cookie logic
+- Auto-pin when "Remember me" checked
+- Show public computer warning for credentials
+- Integrate unpin confirmation dialog
+
+**Testing:**
+- Test all auth methods with persistence options
+- Test pin + remember me combinations
+- Test unpin while logged in
+- Test logout while pinned
+
+**Deployment Notes:**
+- Existing users see new checkbox options on login
+- Session cookies remain default (backward compatible)
+- Persistent cookies only when explicitly opted in
+- Clean break from old cookie format (users re-login)
+
+**Feature Flag:** `ENABLE_CREDENTIAL_PERSISTENCE` (default: true after Release 4)
+
+**Data Migration:**
+- Old cookies (slug-based) continue to work until user re-logins
+- New cookies (ID-based with persistence flag) created on new login
+- Migration happens naturally over time
+
+---
+
+#### Release 6: Slug Change Handling
+**Goal:** Support library metadata changes gracefully
+
+**Scope:**
+- Historical slug tracking (max 5 previous slugs)
+- Slug change notification banner
+- Auto-update pinned libraries when slug changes
+- Redirect from old slug to new slug
+
+**Testing:**
+- Test slug changes in registry
+- Test bookmark with old slug
+- Test notification banner display
+- Test pinned library updates
+
+**Deployment Notes:**
+- Handles registry libraries changing metadata
+- User bookmarks remain functional (with redirect)
+- Pinned libraries auto-update to new slug
+- Notification informs users of URL changes
+
+**Feature Flag:** None needed (handles edge cases gracefully)
+
+---
+
+#### Release 7: Polish & Observability
+**Goal:** Production hardening and monitoring
+
+**Scope:**
+- Comprehensive test coverage (unit + integration)
+- Error tracking for registry fetch failures
+- Metrics for search usage, pin rates
+- Performance monitoring for `/api/libraries`
+- Storybook stories for new components
+- Documentation updates
+- Accessibility audit
+
+**Testing:**
+- Load testing for API route
+- Browser compatibility testing
+- Accessibility testing with screen readers
+- Edge case validation
+
+**Deployment Notes:**
+- No new features, only improvements
+- Monitoring helps identify issues early
+- Documentation helps team maintain code
+
+---
+
+### Config Migration Flow
+
+```
+Current Production Configs:
+┌─────────────────────────────────────────────────────────────┐
+│ Static:                   │ Registry:                       │
+│ libraries:                │ libraries:                      │
+│   nypl: https://...       │   "https://registry.../libs"    │
+│   queens: https://...     │                                 │
+│ [Build-time static]       │ [Build-time fetch]              │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+                    Deploy Release 0
+                    (Config parser update)
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Both formats still work - no behavior change                │
+│ + New registries array supported (no effect yet)            │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+                   Update Config Files
+                 (Registry deployments migrate)
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Static:                   │ Migrated:                       │
+│ libraries:                │ registries:                     │
+│   nypl: https://...       │   - url: https://registry...    │
+│   queens: https://...     │     refresh_min_interval: 60    │
+│ [Build-time static]       │ [Still build-time - no R1 yet]  │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+                    Deploy Release 1
+                (Runtime registry fetching)
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Static:                   │ Runtime:                        │
+│ libraries:                │ registries:                     │
+│   nypl: https://...       │   - url: https://registry...    │
+│   queens: https://...     │     refresh_min_interval: 60    │
+│ [Build-time static]       │ [RUNTIME fetch - no rebuild!]   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Rollback Strategy
+
+Each release should be independently rollback-able:
+
+1. **Release 0:** Simple rollback (only config parser affected, no behavior change)
+2. **Release 1-3:** Simple rollback (no user-visible changes, configs stay migrated)
+3. **Release 4:** Rollback removes search UI (no data loss)
+4. **Release 5:** Rollback disables persistence options (session cookies remain)
+5. **Release 6:** Rollback loses slug redirect (bookmarks may break)
+6. **Release 7:** Rollback loses monitoring (no functional impact)
+
+**Special Case - Release 0 → Release 1 Rollback:**
+- If Release 1 rolled back, migrated configs (using `registries` array) fall back to build-time fetch
+- No data loss, just timing change (runtime → build-time)
+- Can keep migrated config format even with Release 1 rolled back
+
+### Cross-Release Compatibility
+
+- **Release 0:** Enables config migration without requiring Release 1 (build-time still works)
+- **Release 0 + 1:** Config parser supports both old and new formats, Release 1 uses new format for runtime
+- **Release 1 + 2:** Registry fetching works with both slug and ID
+- **Release 2 + 3:** IDs work for both cookies and pinned libraries
+- **Release 3 + 4:** Storage ready before UI shows it
+- **Release 4 + 5:** Pinning works before credential persistence
+- **Release 5 + 6:** Credentials persist correctly even with slug changes
+
+### Environment-Specific Rollout
+
+**Development:**
+- All releases enabled immediately
+- Test with real registry endpoints
+- Validate CLI utility regularly
+
+**Staging:**
+- Enable `ENABLE_REGISTRY_FETCHING` first (Release 1)
+- Soak for 1 week, validate no regressions
+- Enable subsequent releases with 1-week soak each
+
+**Production:**
+- Follow staging by 1-2 weeks
+- Enable registries for subset of users first (A/B test)
+- Monitor error rates and performance
+- Gradual rollout of each release
+
+### Testing Between Releases
+
+- **Regression Suite:** Run after each release
+- **Integration Tests:** Validate cross-release compatibility
+- **Manual QA Checklist:** Test user flows end-to-end
+- **CLI Utility:** Validate registry config before deployment
+
+---
+
+## Implementation Phases
 
 1. Create constants file (`src/constants/registry.ts`)
    - Define refresh intervals, expiration days, historical slug limit
