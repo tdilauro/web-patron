@@ -135,7 +135,7 @@ export const HISTORICAL_SLUG_LIMIT = 5;             // max previous slugs to tra
 
 ---
 
-### 2. Library Search & Affiliation UI
+### 2. Library Search & Pinning UI
 
 **New Components:**
 
@@ -145,31 +145,33 @@ export const HISTORICAL_SLUG_LIMIT = 5;             // max previous slugs to tra
   - Fuzzy search using `fuse.js` (already in dependencies)
   - Initial focus: Search by `catalogEntry.metadata.title` only
   - Display search results with library logos and titles
-  - "Add Library" button for each result
+  - "Pin Library" button for each result
   - Future: Expand to include location and description metadata
 
-**b) Library Affiliation Manager**
-- Location: `src/components/LibraryAffiliations.tsx`
-- Shows list of user's affiliated libraries
-- "Visit" and "Remove" actions per library
-- Indicates which libraries have active credentials
+**b) Pinned Libraries Manager**
+- Location: `src/components/PinnedLibraries.tsx`
+- Shows list of user's pinned libraries
+- "Visit" and "Unpin" actions per library
+- Indicates which libraries have active login credentials
+- Unpin confirmation dialog when logged in
 
 **c) Enhanced Home Page**
 - Update `src/pages/index.tsx` logic
-- Show affiliated libraries first (from localStorage)
+- Show pinned libraries first (from localStorage)
+- UI label: "My Libraries" or simply "Libraries"
 - Add "Find a Library" button → opens search modal
-- Show warning on first affiliation save about public computers
+- Show warning on first pin about public computers
 
 **UI Flow:**
 ```
 User visits base URL (/)
-├─ Has affiliations?
+├─ Has pinned libraries?
 │  ├─ Yes → Show "My Libraries" + "Find Another Library"
 │  └─ No  → Show "Find Your Library" search
 │
 User searches for library
 ├─ Results displayed with metadata
-├─ Click "Add Library" → Save to affiliations
+├─ Click "Pin Library" → Save to pinned libraries
 └─ Optionally navigate to library catalog
 ```
 
@@ -177,10 +179,35 @@ User searches for library
 
 ### 3. Browser Storage Strategy
 
+**Pinned Libraries vs Logged-in Libraries:**
+
+CPW distinguishes between two independent concepts:
+
+1. **Pinned Libraries**: Libraries the user has explicitly added to their personal list
+   - User wants to keep them handy (browse catalog, check availability)
+   - May or may not be logged in
+   - Persisted in localStorage
+   - UI label: "My Libraries" or "Libraries"
+   - User actions: Pin, Unpin, Visit
+
+2. **Logged-in Libraries**: Libraries where user has active authentication
+   - Subset of pinned libraries OR standalone (session-only)
+   - Credentials stored in cookies (scoped by library ID)
+   - Only persisted if library is pinned + user opted into "Remember me"
+   - User actions: Sign in, Sign out
+
+**Key Behaviors:**
+- **Pin without login**: User can pin a library just to browse catalog
+- **Login without pin**: User can log in for a session, credentials not persisted
+- **Pin + Login + "Remember me"**: Credentials persisted (30 days)
+- **Unpin while logged in**: Ask user, then clear credentials
+- **Logout while pinned**: Clear credentials, library stays pinned
+- **"Remember me" checked**: Auto-pin library (persistent credentials require persistent library)
+
 **ID vs Slug Architecture:**
 
 **Important Distinction:**
-- **ID**: Stable identifier from registry (`catalog.metadata.id`) or config key. Used for storage scoping (cookies, affiliations).
+- **ID**: Stable identifier from registry (`catalog.metadata.id`) or config key. Used for storage scoping (cookies, pinned libraries).
 - **Slug**: URL-friendly string computed from library metadata. Used in URL paths (`/[slug]/`).
 - **For static config libraries**: `id` equals the config key (which also serves as slug)
 - **For registry libraries**: `id` comes from `catalog.metadata.id`, slug is computed from metadata
@@ -206,43 +233,47 @@ function computeSlug(catalogEntry: RegistryCatalogEntry): string {
 
 **Storage Architecture:**
 
-**a) Library Affiliations** (new)
+**a) Pinned Libraries** (new)
 ```typescript
-// LocalStorage key: CPW_LIBRARY_AFFILIATIONS
-interface LibraryAffiliation {
+// LocalStorage key: CPW_PINNED_LIBRARIES
+interface PinnedLibrary {
   id: string;           // Stable identifier (for storage keys)
   slug: string;         // URL-friendly (computed, can change)
   title: string;
   authDocUrl: string;
   logoUrl?: string;     // Cached for offline display
-  addedAt: number;      // timestamp
-  persist: boolean;     // user's choice to remember
+  pinnedAt: number;     // timestamp
   source: 'static' | string; // 'static' or registry URL for tracking
 }
 
-type Affiliations = LibraryAffiliation[];
+type PinnedLibraries = PinnedLibrary[];
 
-// Note: No limit on number of affiliations (browser-side storage only)
-// Logo images cached by browser for affiliated libraries
+// Note: No limit on number of pinned libraries (browser-side storage only)
+// Logo images cached by browser for pinned libraries
+// Does NOT contain credentials (those are in cookies)
 ```
 
-**b) Credentials** (enhanced)
+**b) Credentials** (only persisted for pinned libraries with "Remember me")
 ```typescript
 // Cookie key (enhanced): CPW_AUTH_COOKIE/{libraryId}
 // NOTE: Now scoped to library ID, not slug
 interface AuthCredentials {
   token: string;
   methodType: string;
-  persist?: boolean;    // NEW: user's choice
-  expiresAt?: number;   // NEW: optional expiration
 }
+
+// Persistence logic:
+// - If library is pinned AND "Remember me" checked: persistent cookie (30 days)
+// - Otherwise: session cookie (cleared on browser close)
+// - Unpinning a library clears its credentials
 ```
 
 **Storage Locations:**
-- **Affiliations**: `localStorage` keyed by library ID (persistent across sessions if user opts in)
-- **Credentials**: Cookies keyed by library ID (existing mechanism, add persistence option)
+- **Pinned Libraries**: `localStorage` (always persistent for pinned libraries)
+- **Credentials**: Cookies keyed by library ID
   - Session cookies by default (deleted on browser close)
-  - Persistent cookies if user opts in (30-day expiration)
+  - Persistent cookies only if: library is pinned + "Remember me" checked
+  - Unpinning clears cookies regardless of persistence type
 
 **Why ID for storage, Slug for URLs:**
 - IDs are stable (registry-provided or config key)
@@ -272,18 +303,27 @@ interface AuthCredentials {
 ```typescript
 import { CREDENTIAL_EXPIRATION_DAYS } from 'constants/registry';
 
-// Session (current behavior)
-Cookie.set(key, value); // No expires
+// Session cookie (default, or if library not pinned)
+Cookie.set(key, value); // No expires, cleared on browser close
 
-// Persistent (new)
+// Persistent cookie (only if library pinned + "Remember me" checked)
 Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days default
+
+// On unpin: always clear
+Cookie.remove(key); // Regardless of persistence type
 ```
 
 **Login Form Updates:**
 - `src/auth/BasicAuthHandler.tsx`
 - `src/auth/BasicTokenAuthHandler.tsx`
-- Add "Remember my credentials" checkbox
-- Show public computer warning (first time only)
+- `src/auth/SamlAuthHandler.tsx`
+- `src/auth/CleverAuthHandler.tsx`
+- Add two checkboxes:
+  - "Remember me on this device" (credential persistence)
+  - "Pin this library to My Libraries" (library persistence)
+- If "Remember me" checked but library not pinned: show inline warning
+- If "Remember me" checked: auto-pin library (persistent credentials require persistent library)
+- Show public computer warning (first time for each action)
 
 ---
 
@@ -327,15 +367,18 @@ Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days defa
    - Helps validate registry manager logic in development
 5. Update `LibraryData` interface to include `id` field and `source` tracking
 6. Create client-side hook `useLibraries` to fetch from `/api/libraries`
-7. Create `LibraryAffiliationsContext` for affiliation management (client-side)
-   - No limit on number of affiliations
+7. Create `PinnedLibrariesContext` for pinned library management (client-side)
+   - No limit on number of pinned libraries
    - Tracks source for each library
-8. Add localStorage utilities for affiliations (client-side only)
-9. Update `useCredentials` hook to support persistence option and use library ID
+   - Tracks login status per library
+8. Add localStorage utilities for pinned libraries (client-side only)
+9. Update `useCredentials` hook to use library ID and check if library is pinned
+   - Persistent cookies only for pinned libraries with "Remember me"
    - Clean break for cookie migration (no automatic migration)
-10. Add public computer warning modal component
+10. Add public computer warning modal component (two variants: pin warning, credential warning)
 11. Create slug ↔ id mapping utilities (server-side primary, client receives computed values)
 12. Implement slug redirect with user notification banner
+13. Add unpin confirmation dialog component
 
 **Estimated Complexity:** High (server-side architecture shift)
 
@@ -347,10 +390,11 @@ Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days defa
 - `src/utils/librarySlug.ts` (new) - Server-side slug generation hook from catalog entries
 - `src/hooks/useLibraries.ts` (new) - Client hook to fetch from API route
 - `src/interfaces.ts` (modify) - Add `id` and `source` fields to `LibraryData`
-- `src/context/LibraryAffiliationsContext.tsx` (new) - Client-side affiliation management
-- `src/utils/libraryAffiliations.ts` (new) - Client-side affiliation storage
+- `src/context/PinnedLibrariesContext.tsx` (new) - Client-side pinned library management
+- `src/utils/pinnedLibraries.ts` (new) - Client-side pinned library storage
 - `src/auth/useCredentials.ts` (modify) - Use library ID instead of slug
-- `src/components/PublicComputerWarning.tsx` (new)
+- `src/components/PublicComputerWarning.tsx` (new) - Two variants for pin/credential warnings
+- `src/components/UnpinConfirmationDialog.tsx` (new) - Confirm unpin when logged in
 - `src/components/SlugChangeNotification.tsx` (new) - Banner for slug changes
 - `src/dataflow/getLibraryData.ts` (modify) - Include ID in `buildLibraryData`
 - `package.json` (modify) - Add `test:registry` script
@@ -362,27 +406,35 @@ Cookie.set(key, value, { expires: CREDENTIAL_EXPIRATION_DAYS }); // 30 days defa
 1. Create `LibrarySearch` component with fuzzy search
    - Initial search by `metadata.title` only
    - Support for deep linking with query parameter (`/add-library?q=queens`)
-2. Create `LibraryAffiliations` management component
-3. Update home page (`src/pages/index.tsx`) to show affiliations
+   - "Pin Library" button for each result
+2. Create `PinnedLibraries` management component
+   - Shows list with login status indicators
+   - "Unpin" action with confirmation if logged in
+3. Update home page (`src/pages/index.tsx`) to show pinned libraries
+   - UI label: "My Libraries" or "Libraries"
 4. Add "Find a Library" flow
-5. Implement logo caching for affiliated libraries (browser cache)
+5. Implement logo caching for pinned libraries (browser cache)
 
 **Estimated Complexity:** Medium-High
 
 **Key Files:**
 - `src/components/LibrarySearch.tsx` (new)
-- `src/components/LibraryAffiliations.tsx` (new)
+- `src/components/PinnedLibraries.tsx` (new)
 - `src/pages/index.tsx` (modify)
 - `src/components/MultiLibraryHome.tsx` (modify)
 
 ---
 
-### Phase 3: Credential Persistence
+### Phase 3: Credential Persistence & Login Enhancement
 
-1. Update all login forms to include "Remember me" checkbox
-2. Integrate public computer warning into login flow
-3. Update cookie logic to support session vs persistent
-4. Add "Forget me" functionality to clear credentials
+1. Update all login forms to include two checkboxes:
+   - "Remember me on this device"
+   - "Pin this library to My Libraries"
+2. Implement logic: "Remember me" auto-pins library
+3. Show inline warning if "Remember me" checked but library not pinned
+4. Integrate public computer warning into login/pin flows
+5. Update cookie logic to support session vs persistent based on pin status
+6. Add "Sign out" functionality that preserves pinned status
 
 **Estimated Complexity:** Low-Medium
 
@@ -476,15 +528,14 @@ export interface ServerLibraryData extends ClientLibraryInfo {
   source: 'static' | string; // 'static' or registry URL
 }
 
-// Client-side affiliation (localStorage) - matches updated interface from earlier
-export interface LibraryAffiliation {
+// Client-side pinned library (localStorage)
+export interface PinnedLibrary {
   id: string;           // Stable identifier
   slug: string;         // URL-friendly (computed server-side)
   title: string;
   authDocUrl: string;
   logoUrl?: string;     // Cached for offline display
-  addedAt: number;
-  persist: boolean;
+  pinnedAt: number;     // timestamp
   source: 'static' | string; // 'static' or registry URL for tracking
 }
 
@@ -568,7 +619,7 @@ interface LibraryMapping {
 - Existing build-time library configs continue to work (id = slug for these)
 - Registry URL in config is optional
 - Credential cookies keyed by ID remain compatible across slug changes
-- Affiliations stored by ID remain compatible across slug changes
+- Pinned libraries stored by ID remain compatible across slug changes
 - Historical slugs (up to 5) provide backwards compatibility for bookmarks
 - Cookie migration: Clean break (users must re-login, no automatic migration)
 - No breaking changes to existing API
@@ -578,13 +629,15 @@ interface LibraryMapping {
 ## Security Considerations
 
 1. **Public Computer Warning:**
+   - Two separate warnings: one for pinning libraries, one for credential persistence
    - Clear, prominent warning before saving any data
    - Don't auto-dismiss warning
    - Require explicit user action
 
 2. **Credential Storage:**
    - Session cookies by default (cleared on browser close)
-   - Persistent cookies only with explicit opt-in
+   - Persistent cookies only if library is pinned + "Remember me" checked
+   - Unpinning a library clears its credentials
    - Consider adding "Clear all data" button in settings
 
 3. **Registry Fetching:**
@@ -595,36 +648,70 @@ interface LibraryMapping {
 
 4. **localStorage Limits:**
    - Gracefully handle QuotaExceededError
-   - Implement cleanup for old affiliations
-   - Consider max affiliation count (e.g., 20 libraries)
+   - Implement cleanup for old pinned libraries if needed
+   - No hard limit on pinned libraries (but monitor localStorage usage)
 
 ---
 
 ## User Experience Enhancements
 
-1. **First-Time User Flow:**
-   ```
-   Visit CPW → See "Find Your Library"
-   → Search by name → Add library
-   → See public computer warning
-   → Choose to persist or not
-   → Navigate to library catalog
-   ```
+### User Flow Scenarios
 
-2. **Returning User Flow:**
-   ```
-   Visit CPW → See "My Libraries" list
-   → Click library → Enter catalog
-   → (Auto-login if credentials persisted)
-   ```
+**1. Pin Then Login:**
+```
+User searches and pins library
+  → Pin confirmation + public computer warning
+  → Library added to "My Libraries"
+  → User navigates to library catalog
+  → User clicks "Sign In"
+  → Login form shows:
+     ☑ "Remember me on this device"
+     (Pin checkbox hidden - already pinned)
+  → If "Remember me" checked: Persistent cookie (30 days)
+  → If unchecked: Session cookie
+```
 
-3. **Multi-Library User Flow:**
-   ```
-   Visit CPW → See all affiliated libraries
-   → Switch between them easily
-   → Add new library without losing others
-   → Manage affiliations (remove unwanted)
-   ```
+**2. Login Without Pin (Direct URL):**
+```
+User navigates to library URL directly
+  → Not pinned, not logged in
+  → User clicks "Sign In"
+  → Login form shows:
+     ☐ "Remember me on this device"
+     ☐ "Pin this library to My Libraries"
+  → User checks "Remember me" → auto-checks "Pin" (persistent credentials require pinned library)
+  → User can check "Pin" alone → library pinned, session cookie only
+  → Submit: Library pinned (if checked) + credentials stored
+```
+
+**3. Unpin While Logged In:**
+```
+User clicks "Unpin" on logged-in library
+  → Confirmation dialog:
+     "You are currently signed in to [Library].
+      Unpinning will sign you out."
+     [Cancel] [Unpin and Sign Out]
+  → If confirmed:
+     - Remove from pinned libraries
+     - Clear credentials cookie
+```
+
+**4. Logout While Pinned:**
+```
+User clicks "Sign Out" on pinned library
+  → Clear credentials cookie
+  → Library remains in "My Libraries"
+  → Can sign back in later
+```
+
+**5. Returning User:**
+```
+Visit CPW → See "My Libraries" list
+  → Shows pinned libraries with login status
+  → Click pinned library:
+     - If logged in: Enter catalog (authenticated)
+     - If not logged in: See "Sign In" option
+```
 
 ---
 
@@ -827,13 +914,13 @@ The following decisions have been made based on requirements and discussions:
    - Log collisions with library name and identifier
    - Track source (static or registry URL) for each library
 
-3. **Affiliation Limit**: No limit (browser-side storage only)
+3. **Pinned Library Limit**: No limit (browser-side storage only)
 
 4. **Credential Expiration**: 30 days (defined in constant)
 
 5. **Search Metadata**: Initial focus on `metadata.title` only
 
-6. **Offline Support**: No registry caching, but cache library logos for affiliations
+6. **Offline Support**: No registry caching, but cache library logos for pinned libraries
 
 7. **Analytics**: Not tracking at this time
 
@@ -870,12 +957,12 @@ This implementation plan addresses all requirements:
 ✅ **Runtime library availability** - Libraries become available without rebuild via server-side runtime registry fetching
 ✅ **Server-side state management** - Registry data cached on server; only client-safe properties exposed to browser
 ✅ **Library search** - Fuzzy search component to find libraries by name
-✅ **Library affiliation** - "Add this library" functionality with localStorage persistence (client-side)
-✅ **Multiple affiliations** - Users can be affiliated with multiple libraries
-✅ **Affiliation persistence** - Optional browser storage with public computer warnings
-✅ **Affiliation management** - Ability to remove persisted affiliations
-✅ **Credential persistence** - Optional "Remember me" for login credentials
-✅ **Smart home page** - Shows affiliated libraries with option to find more
+✅ **Library pinning** - "Pin this library" functionality with localStorage persistence (client-side)
+✅ **Multiple pinned libraries** - Users can pin multiple libraries (no limit)
+✅ **Pin/Login independence** - Users can pin without logging in, or login without pinning (session-only)
+✅ **Credential persistence** - Only for pinned libraries with "Remember me" checked
+✅ **Unpin protection** - Confirmation dialog when unpinning logged-in libraries
+✅ **Smart home page** - Shows "My Libraries" (pinned libraries) with login status
 ✅ **ID/Slug separation** - Stable IDs for storage, computed slugs for URLs (server-side computation)
 ✅ **Intelligent caching** - Server-side min/max interval refresh strategy with fallback to last successful state
 
