@@ -110,10 +110,10 @@ libraries:
 #     libraries: https://registry.thepalaceproject.org/libraries
 #
 #   NEW (recommended):
-#     registries:
-#       - url: https://registry.thepalaceproject.org/libraries
-#         refreshMinInterval: 60
-#         refreshMaxInterval: 300
+registries:
+ - url: https://registry.thepalaceproject.org/libraries
+   refreshMinInterval: 60
+   refreshMaxInterval: 300
 #
 # After updating to the new format:
 # 1. With Release 0: Libraries still fetched at build time (no behavior change)

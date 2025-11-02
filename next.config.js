@@ -32,7 +32,7 @@ const BUILD_ID = `${APP_VERSION}-${GIT_BRANCH}.${GIT_COMMIT_SHA}`;
 
 // fetch the config file synchronously. This will wait until the command exits to continue.
 const APP_CONFIG = JSON.parse(
-  execSync("node --unhandled-rejections=strict src/config/fetch-config.js", {
+  execSync("npx tsx --unhandled-rejections=strict src/config/fetch-config.ts", {
     encoding: "utf-8"
   })
 );
